@@ -1,5 +1,6 @@
 name: Sync upstream
 
+# Reusable template for all new sync-upstream workflows.
 # Keeps this fork up to date with its upstream repository.
 #
 # - No new upstream commits -> no-op.
@@ -9,8 +10,9 @@ name: Sync upstream
 #                              opened as a PR containing the conflict markers for
 #                              manual resolution.
 #
-# Tune the policy per fork by editing the two env vars below. Scheduled runs
-# are staggered per repo; trigger manually with workflow_dispatch anytime.
+# Per-repo tuning: add fork-owned files to KEEP_OURS and upstream-owned or
+# boilerplate files to KEEP_THEIRS. This version is safe as the shared baseline
+# for any new sync-upstream.yaml workflow.
 
 on:
   schedule:
@@ -51,6 +53,7 @@ jobs:
         id: upstream
         env:
           GH_TOKEN: ${{ github.token }}
+        shell: bash
         run: |
           parent=$(gh api "repos/${{ github.repository }}" --jq '.parent.full_name // empty')
           if [ -z "$parent" ]; then
@@ -63,6 +66,7 @@ jobs:
 
       - name: Fetch upstream
         if: steps.upstream.outputs.skip != 'true'
+        shell: bash
         run: |
           git remote add upstream "https://github.com/${{ steps.upstream.outputs.parent }}.git"
           git fetch --no-tags upstream "${{ steps.upstream.outputs.ubranch }}"
@@ -71,6 +75,7 @@ jobs:
         if: steps.upstream.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
+        shell: bash
         run: |
           set -euo pipefail
           PARENT="${{ steps.upstream.outputs.parent }}"
@@ -81,8 +86,6 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          # Push to the default branch; if the push is rejected (branch
-          # protection), fall back to a review PR.
           push_or_pr() {
             if ! git push origin "$BRANCH" 2>/dev/null; then
               local cb="sync-upstream/pr-$(date +%Y%m%d-%H%M%S)"
@@ -107,15 +110,12 @@ jobs:
             exit 0
           fi
 
-          # The merge stopped on conflicts. If none are actually recorded,
-          # something else went wrong (e.g. untracked-file clobber) — abort.
           if [ -z "$(git diff --name-only --diff-filter=U)" ]; then
             git merge --abort 2>/dev/null || true
             echo "Merge failed without conflicts (non-conflict error) — this run was aborted." >> "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
 
-          # Classify and resolve conflicts per policy.
           unresolved=()
           while IFS= read -r f; do
             [ -z "$f" ] && continue
@@ -131,12 +131,18 @@ jobs:
               done
             fi
             case "$resolved" in
-              ours)   git checkout --ours -- "$f" && git add -- "$f"
-                      echo "KEPT OURS: $f" >> "$GITHUB_STEP_SUMMARY" ;;
-              theirs) git checkout --theirs -- "$f" && git add -- "$f"
-                      echo "TOOK UPSTREAM: $f" >> "$GITHUB_STEP_SUMMARY" ;;
-              *)      git add -- "$f" # stage as-is, conflict markers included
-                      unresolved+=("$f") ;;
+              ours)
+                git checkout --ours -- "$f" && git add -- "$f"
+                echo "KEPT OURS: $f" >> "$GITHUB_STEP_SUMMARY"
+                ;;
+              theirs)
+                git checkout --theirs -- "$f" && git add -- "$f"
+                echo "TOOK UPSTREAM: $f" >> "$GITHUB_STEP_SUMMARY"
+                ;;
+              *)
+                git add -- "$f"
+                unresolved+=("$f")
+                ;;
             esac
           done < <(git diff --name-only --diff-filter=U)
 
